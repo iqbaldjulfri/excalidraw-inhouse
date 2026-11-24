@@ -26,6 +26,11 @@ import {
 
 import type { DriveDrawing } from "../data/googleDrive/driveApi";
 
+// jsdom has no object URLs; thumbnails only need a unique string each
+let objectUrlCount = 0;
+URL.createObjectURL = vi.fn(() => `blob:thumbnail-${++objectUrlCount}`);
+URL.revokeObjectURL = vi.fn();
+
 vi.mock("../data/googleDrive/auth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../data/googleDrive/auth")>()),
   isGoogleDriveEnabled: () => true,
@@ -72,13 +77,20 @@ const createFakeClient = (remote: { content: string; version: string }) => {
     listDrawings: vi.fn(async () => [drawingMeta(remote.version)]),
     getDrawingMetadata: vi.fn(async () => drawingMeta(remote.version)),
     downloadDrawing: vi.fn(async () => remote.content),
-    updateDrawingContent: vi.fn(async (_id: string, content: string) => {
-      remote.content = content;
-      remote.version = String(Number(remote.version) + 1);
-      return drawingMeta(remote.version);
-    }),
+    updateDrawingContent: vi.fn(
+      async (_id: string, content: string, _thumbnail?: Blob) => {
+        remote.content = content;
+        remote.version = String(Number(remote.version) + 1);
+        return drawingMeta(remote.version);
+      },
+    ),
     createDrawing: vi.fn(
-      async (opts: { folderId: string; name: string; content: string }) => ({
+      async (opts: {
+        folderId: string;
+        name: string;
+        content: string;
+        thumbnail?: Blob;
+      }) => ({
         ...drawingMeta("1"),
         id: `new-in-${opts.folderId}`,
         name: `${opts.name}.excalidraw`,
@@ -87,6 +99,12 @@ const createFakeClient = (remote: { content: string; version: string }) => {
     tagAsDrawing: vi.fn(async () => drawingMeta(remote.version)),
     renameDrawing: vi.fn(),
     trashDrawing: vi.fn(),
+    setThumbnail: vi.fn(async (id: string, _thumbnail: Blob) => ({
+      ...drawingMeta(remote.version),
+      id,
+    })),
+    listFolders: vi.fn(async () => [{ id: "folder-1", name: "Excalidraw" }]),
+    createFolder: vi.fn(async (name: string) => ({ id: "made-1", name })),
   };
   return client;
 };
@@ -137,6 +155,7 @@ const setUpSync = async (opts: {
     pickFolder: () => Promise<{ id: string; name: string } | null>;
   };
   failConnect?: boolean;
+  renderThumbnail?: () => Promise<Blob>;
 }) => {
   localStorage.setItem(
     LINK_KEY,
@@ -159,6 +178,9 @@ const setUpSync = async (opts: {
     client: client as unknown as DriveClient,
     confirmReplaceCanvas: opts.confirmReplaceCanvas,
     pickers: opts.pickers,
+    renderThumbnail:
+      opts.renderThumbnail ??
+      (async () => new Blob(["thumb"], { type: "image/webp" })),
   });
   await sync.init(fakeApi.api as unknown as ExcalidrawImperativeAPI, {
     isExternalScene: false,
@@ -708,6 +730,111 @@ describe("DriveSync drawing names", () => {
     expect(appJotaiStore.get(driveStateAtom).current?.name).toBe("Roadmap");
     expect(api.updateScene).toHaveBeenCalledWith(
       expect.objectContaining({ appState: { name: "Roadmap" } }),
+    );
+  });
+});
+
+describe("DriveSync thumbnails", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const base = {
+    local: scene(rect("a", 1)),
+    remote: scene(rect("a", 1)),
+    linkedVersion: "7",
+    remoteVersion: "7",
+  };
+
+  const thumbnailArgs = (client: ReturnType<typeof createFakeClient>) =>
+    client.updateDrawingContent.mock.calls.map(([, , thumbnail]) =>
+      thumbnail ? "thumbnail" : "none",
+    );
+
+  it("sends a thumbnail with an upload at most every 30 seconds", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { sync, client, setElements } = await setUpSync(base);
+
+    setElements(scene(rect("a", 2)));
+    await sync.syncNow();
+    vi.setSystemTime(Date.now() + 10_000);
+    setElements(scene(rect("a", 3)));
+    await sync.syncNow();
+    vi.setSystemTime(Date.now() + 25_000);
+    setElements(scene(rect("a", 4)));
+    await sync.syncNow();
+
+    expect(thumbnailArgs(client)).toEqual(["thumbnail", "none", "thumbnail"]);
+    expect(appJotaiStore.get(driveStateAtom).localThumbnails["file-1"]).toMatch(
+      /^blob:/,
+    );
+  });
+
+  it("sends a skipped thumbnail before another drawing replaces the canvas", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { sync, client, setElements } = await setUpSync(base);
+    setElements(scene(rect("a", 2)));
+    await sync.syncNow();
+    setElements(scene(rect("a", 3)));
+    await sync.syncNow();
+    expect(client.setThumbnail).not.toHaveBeenCalled();
+
+    client.getDrawingMetadata.mockResolvedValueOnce(drawingMeta("8"));
+    client.getDrawingMetadata.mockResolvedValueOnce(drawingMeta("8"));
+    client.getDrawingMetadata.mockResolvedValueOnce({
+      ...drawingMeta("1"),
+      id: "file-2",
+      thumbnailLink: "https://lh3.example/x=s220",
+    });
+    await sync.openDrawing("file-2");
+
+    expect(client.setThumbnail).toHaveBeenCalledTimes(1);
+    expect(client.setThumbnail.mock.calls[0][0]).toBe("file-1");
+    expect(appJotaiStore.get(driveStateAtom).current?.fileId).toBe("file-2");
+  });
+
+  it("still saves when the thumbnail can't be rendered", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { sync, client, setElements } = await setUpSync({
+      ...base,
+      renderThumbnail: async () => {
+        throw new Error("no canvas");
+      },
+    });
+
+    setElements(scene(rect("a", 2)));
+    await sync.syncNow();
+
+    expect(thumbnailArgs(client)).toEqual(["none"]);
+    expect(appJotaiStore.get(driveStateAtom).syncStatus).toBe("synced");
+    // stops the retry timer so it can't fire into the next test
+    sync.unlink();
+    warn.mockRestore();
+  });
+
+  it("gives an opened drawing a thumbnail when Drive has none", async () => {
+    const { sync, client } = await setUpSync({
+      ...base,
+      confirmReplaceCanvas: async () => true,
+    });
+    sync.unlink();
+
+    await sync.openDrawing("file-1");
+    await vi.waitFor(() => expect(client.setThumbnail).toHaveBeenCalled());
+
+    expect(client.setThumbnail.mock.calls[0][0]).toBe("file-1");
+  });
+
+  it("sends the thumbnail with a drawing saved from the canvas", async () => {
+    const { sync, client } = await setUpSync(base);
+
+    await sync.createDrawing({ fromCanvas: true, name: "Sketch" });
+
+    expect(client.createDrawing.mock.calls[0][0].thumbnail).toBeInstanceOf(
+      Blob,
     );
   });
 });
