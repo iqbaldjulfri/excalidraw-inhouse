@@ -3,10 +3,10 @@ import clsx from "clsx";
 
 import DropdownMenu from "@excalidraw/excalidraw/components/dropdownMenu/DropdownMenu";
 import {
-  LoadIcon,
   PlusIcon,
   TrashIcon,
   chevronDownIcon,
+  gridIcon,
   pencilIcon,
 } from "@excalidraw/excalidraw/components/icons";
 import { useI18n } from "@excalidraw/excalidraw/i18n";
@@ -16,11 +16,17 @@ import { currentUserAtom, signInUrl, signOut } from "../data/session";
 import { toDrawingName } from "../data/googleDrive/driveApi";
 import { driveStateAtom, driveSync } from "../data/googleDrive/DriveSync";
 
+import { DriveDrawingsDialog } from "./DriveDrawingsDialog";
+import { DriveFolderDialog } from "./DriveFolderDialog";
+import { DriveThumbnail } from "./DriveThumbnail";
+import { formatRelativeTime, useNow } from "./driveTime";
+
 import "./DriveTitle.scss";
 
 import type { DriveState } from "../data/googleDrive/DriveSync";
 
 const RECENT_LIMIT = 8;
+const RECENT_THUMBNAIL_PX = 160;
 
 const cloudIcon = (
   <svg
@@ -37,31 +43,6 @@ const cloudIcon = (
     <path d="M6.657 18c-2.572 0 -4.657 -2.007 -4.657 -4.483c0 -2.475 2.085 -4.482 4.657 -4.482c.393 -1.762 1.794 -3.2 3.675 -3.773c1.88 -.572 3.956 -.193 5.444 1c1.488 1.19 2.162 3.007 1.77 4.769h.99c1.913 0 3.464 1.56 3.464 3.486c0 1.927 -1.551 3.487 -3.465 3.487h-11.878" />
   </svg>
 );
-
-const formatRelativeTime = (timestamp: number, now: number, lang: string) => {
-  const seconds = Math.round((timestamp - now) / 1000);
-  const format = new Intl.RelativeTimeFormat(lang, { numeric: "auto" });
-  const units: [Intl.RelativeTimeFormatUnit, number][] = [
-    ["day", 86400],
-    ["hour", 3600],
-    ["minute", 60],
-  ];
-  for (const [unit, size] of units) {
-    if (Math.abs(seconds) >= size) {
-      return format.format(Math.round(seconds / size), unit);
-    }
-  }
-  return format.format(0, "second");
-};
-
-const useNow = (intervalMs: number) => {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
-    return () => window.clearInterval(id);
-  }, [intervalMs]);
-  return now;
-};
 
 type DotStatus = "idle" | "syncing" | "synced" | "error";
 
@@ -205,6 +186,7 @@ export const DriveTitle = ({ isMobile }: { isMobile: boolean }) => {
   const user = useAtomValue(currentUserAtom);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
+  const [dialog, setDialog] = useState<"drawings" | "folders" | null>(null);
   const status = useStatusText(state);
   const now = useNow(60 * 1000);
 
@@ -356,15 +338,12 @@ export const DriveTitle = ({ isMobile }: { isMobile: boolean }) => {
               >
                 {t("googleDrive.actions.newDrawing")}
               </DropdownMenu.Item>
-              {hasPicker && (
-                <DropdownMenu.Item
-                  icon={LoadIcon}
-                  disabled={state.busy}
-                  onSelect={select(() => driveSync.openFromDrive())}
-                >
-                  {t("googleDrive.actions.openFromDrive")}
-                </DropdownMenu.Item>
-              )}
+              <DropdownMenu.Item
+                icon={gridIcon}
+                onSelect={select(() => setDialog("drawings"))}
+              >
+                {t("googleDrive.actions.allDrawings")}
+              </DropdownMenu.Item>
 
               <DropdownMenu.Separator />
               <DropdownMenu.Group title={t("googleDrive.recent")}>
@@ -388,8 +367,15 @@ export const DriveTitle = ({ isMobile }: { isMobile: boolean }) => {
                           }
                         })}
                       >
-                        <span className="drive-title__recent-name">
-                          {toDrawingName(drawing.name)}
+                        <span className="drive-title__recent">
+                          <DriveThumbnail
+                            drawing={drawing}
+                            longestSide={RECENT_THUMBNAIL_PX}
+                            className="drive-title__recent-thumbnail"
+                          />
+                          <span className="drive-title__recent-name">
+                            {toDrawingName(drawing.name)}
+                          </span>
                         </span>
                       </DropdownMenu.Item>
                     );
@@ -422,7 +408,7 @@ export const DriveTitle = ({ isMobile }: { isMobile: boolean }) => {
                 </>
               )}
 
-              {hasPicker && state.saveFolder && (
+              {state.saveFolder && (
                 <DropdownMenu.ItemCustom className="drive-title__menu-note drive-title__menu-row">
                   <span title={state.saveFolder.name}>
                     {t("googleDrive.saveFolder", {
@@ -432,7 +418,7 @@ export const DriveTitle = ({ isMobile }: { isMobile: boolean }) => {
                   <button
                     type="button"
                     className="drive-title__link"
-                    onClick={select(() => driveSync.chooseSaveFolder())}
+                    onClick={select(() => setDialog("folders"))}
                   >
                     {t("googleDrive.actions.changeFolder")}
                   </button>
@@ -461,6 +447,19 @@ export const DriveTitle = ({ isMobile }: { isMobile: boolean }) => {
           </DropdownMenu.ItemCustom>
         </DropdownMenu.Content>
       </DropdownMenu>
+      {dialog === "drawings" && (
+        <DriveDrawingsDialog
+          canImport={hasPicker}
+          onClose={() => setDialog(null)}
+          onNewDrawing={newDrawing}
+        />
+      )}
+      {dialog === "folders" && (
+        <DriveFolderDialog
+          canPickAnywhere={hasPicker}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </div>
   );
 };

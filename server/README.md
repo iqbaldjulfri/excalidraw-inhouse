@@ -26,7 +26,7 @@ Do this in a Google Cloud project owned by your Workspace organization.
 3. **Branding.** Set the app name and a support email. Add your domain under authorized domains.
 4. **Data access.** Add the scopes `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` and `.../auth/drive.file`.
 5. **Create the client.** Clients → Create client → **Web application**. Add the authorized redirect URI `https://<your-domain>/auth/callback`, and `http://localhost:3001/auth/callback` for local development. Copy the client ID and secret into the environment below.
-6. **Create the picker key** (for "Open from Drive" and "Choose save folder"). APIs & Services → Credentials → Create credentials → **API key**. Restrict it to **Websites** `https://<your-domain>/*` (and `http://localhost:3001/*` for development) and to the **Google Picker API**. This key is sent to browsers by design, so those restrictions are what protect it. Also note the **project number** from IAM & Admin → Settings; it must be the project that owns the OAuth client.
+6. **Create the picker key** (for "Import from Google Drive" and "Choose another folder in Google Drive", which reach files and folders the app hasn't seen yet). APIs & Services → Credentials → Create credentials → **API key**. Restrict it to **Websites** `https://<your-domain>/*` (and `http://localhost:3001/*` for development) and to the **Google Picker API**. This key is sent to browsers by design, so those restrictions are what protect it. Also note the **project number** from IAM & Admin → Settings; it must be the project that owns the OAuth client.
 7. **If your organization restricts third-party apps' access to Drive**, open the Admin console → Security → API controls → App access control and mark this client as **Trusted**.
 
 ## Configuration
@@ -38,7 +38,7 @@ Do this in a Google Cloud project owned by your Workspace organization.
 | `GOOGLE_CLIENT_SECRET` | yes | From step 5 |
 | `ALLOWED_DOMAIN` | one of these two | Workspace domain, e.g. `example.com`, matched against Google's `hd` claim |
 | `ALLOWED_EMAILS` | one of these two | Comma-separated accounts let in regardless of domain, e.g. for testing with personal accounts. Leave empty in production unless you mean to make named exceptions. List Gmail or Workspace addresses: a Google account registered with another provider's email can stay "verified" after that address changes hands. Removing an account signs it out on its next request |
-| `GOOGLE_PICKER_API_KEY` | no | From step 6. Without it the picker buttons are hidden |
+| `GOOGLE_PICKER_API_KEY` | no | From step 6. Without it those two links are hidden, and the app only lists drawings and folders it made itself |
 | `GOOGLE_PROJECT_NUMBER` | no | From step 6. Set both picker variables or neither |
 | `SESSION_SECRET` | yes | Random string of 32+ characters: `openssl rand -base64 48` |
 | `DATA_DIR` | no | Where sessions and stored drawings go. Default `./data` |

@@ -12,7 +12,9 @@ const ROLE_KEY = "excalidrawRole";
 const ROLE_FOLDER = "drawings-folder";
 const ROLE_DRAWING = "drawing";
 
-const DRAWING_FIELDS = "id,name,modifiedTime,version,capabilities(canEdit)";
+const DRAWING_FIELDS =
+  "id,name,modifiedTime,version,thumbnailLink,capabilities(canEdit)";
+const FOLDER_FIELDS = "id,name";
 
 export type DriveDrawing = {
   id: string;
@@ -20,7 +22,64 @@ export type DriveDrawing = {
   modifiedTime: string;
   /** Drive bumps this on every change to the file, including our own writes. */
   version: string;
+  /**
+   * Expires within hours. Measured in Nov 2026: an <img> loads it without
+   * cookies or auth, but fetch() can't, as it sends no CORS headers.
+   */
+  thumbnailLink?: string;
   capabilities?: { canEdit?: boolean };
+};
+
+export type DriveFolderItem = { id: string; name: string };
+
+/** Drive serves thumbnails at the size named by the link's `=s<px>` suffix. */
+export const sizeThumbnailLink = (link: string, longestSide: number) =>
+  `${link.replace(/=s\d+$/, "")}=s${longestSide}`;
+
+const toBase64Url = async (blob: Blob) => {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+};
+
+// Drive shows this only when it can't make its own thumbnail, which it can't
+// for .excalidraw files. A content upload without it keeps the old one.
+const thumbnailHint = async (thumbnail: Blob | undefined) =>
+  thumbnail
+    ? {
+        contentHints: {
+          thumbnail: {
+            image: await toBase64Url(thumbnail),
+            mimeType: thumbnail.type,
+          },
+        },
+      }
+    : null;
+
+const multipartBody = (metadata: object, content: string) => {
+  const boundary = `excalidraw-${Math.random().toString(36).slice(2)}`;
+  const body = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    JSON.stringify(metadata),
+    `--${boundary}`,
+    `Content-Type: ${MIME_TYPES.excalidraw}`,
+    "",
+    content,
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+  return {
+    body,
+    contentType: `multipart/related; boundary=${boundary}`,
+  };
 };
 
 export class DriveApiError extends Error {
@@ -142,33 +201,21 @@ export class DriveClient {
     folderId: string;
     name: string;
     content: string;
+    thumbnail?: Blob;
   }): Promise<DriveDrawing> {
-    const boundary = `excalidraw-${Math.random().toString(36).slice(2)}`;
-    const metadata = {
-      name: toDriveFileName(opts.name),
-      mimeType: MIME_TYPES.excalidraw,
-      parents: [opts.folderId],
-      appProperties: { [ROLE_KEY]: ROLE_DRAWING },
-    };
-    const body = [
-      `--${boundary}`,
-      "Content-Type: application/json; charset=UTF-8",
-      "",
-      JSON.stringify(metadata),
-      `--${boundary}`,
-      `Content-Type: ${MIME_TYPES.excalidraw}`,
-      "",
+    const { body, contentType } = multipartBody(
+      {
+        name: toDriveFileName(opts.name),
+        mimeType: MIME_TYPES.excalidraw,
+        parents: [opts.folderId],
+        appProperties: { [ROLE_KEY]: ROLE_DRAWING },
+        ...(await thumbnailHint(opts.thumbnail)),
+      },
       opts.content,
-      `--${boundary}--`,
-      "",
-    ].join("\r\n");
+    );
     return this.requestJSON<DriveDrawing>(
       `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=${DRAWING_FIELDS}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-        body,
-      },
+      { method: "POST", headers: { "Content-Type": contentType }, body },
     );
   }
 
@@ -187,15 +234,79 @@ export class DriveClient {
     return response.text();
   }
 
-  updateDrawingContent(fileId: string, content: string): Promise<DriveDrawing> {
+  async updateDrawingContent(
+    fileId: string,
+    content: string,
+    thumbnail?: Blob,
+  ): Promise<DriveDrawing> {
+    const url = `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(fileId)}`;
+    if (!thumbnail) {
+      return this.requestJSON<DriveDrawing>(
+        `${url}?uploadType=media&fields=${DRAWING_FIELDS}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": MIME_TYPES.excalidraw },
+          body: content,
+        },
+      );
+    }
+    const { body, contentType } = multipartBody(
+      (await thumbnailHint(thumbnail))!,
+      content,
+    );
     return this.requestJSON<DriveDrawing>(
-      `${DRIVE_UPLOAD_API}/files/${encodeURIComponent(
+      `${url}?uploadType=multipart&fields=${DRAWING_FIELDS}`,
+      { method: "PATCH", headers: { "Content-Type": contentType }, body },
+    );
+  }
+
+  async setThumbnail(fileId: string, thumbnail: Blob): Promise<DriveDrawing> {
+    return this.requestJSON<DriveDrawing>(
+      `${DRIVE_API}/files/${encodeURIComponent(
         fileId,
-      )}?uploadType=media&fields=${DRAWING_FIELDS}`,
+      )}?fields=${DRAWING_FIELDS}`,
       {
         method: "PATCH",
-        headers: { "Content-Type": MIME_TYPES.excalidraw },
-        body: content,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(await thumbnailHint(thumbnail)),
+      },
+    );
+  }
+
+  /**
+   * With the drive.file scope this returns only folders the app made or the
+   * user picked in Google's picker, not the whole Drive.
+   */
+  async listFolders(): Promise<DriveFolderItem[]> {
+    const folders: DriveFolderItem[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({
+        q: `mimeType='${FOLDER_MIME_TYPE}' and trashed=false`,
+        fields: `nextPageToken,files(${FOLDER_FIELDS})`,
+        orderBy: "name",
+        pageSize: "100",
+      });
+      if (pageToken) {
+        params.set("pageToken", pageToken);
+      }
+      const page = await this.requestJSON<{
+        files: DriveFolderItem[];
+        nextPageToken?: string;
+      }>(`${DRIVE_API}/files?${params}`);
+      folders.push(...page.files);
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+    return folders;
+  }
+
+  createFolder(name: string): Promise<DriveFolderItem> {
+    return this.requestJSON<DriveFolderItem>(
+      `${DRIVE_API}/files?fields=${FOLDER_FIELDS}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, mimeType: FOLDER_MIME_TYPE }),
       },
     );
   }

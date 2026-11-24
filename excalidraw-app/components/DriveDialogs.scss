@@ -1,0 +1,212 @@
+.excalidraw {
+  .drive-thumbnail {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background-color: var(--color-surface-low);
+
+    img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      // thumbnails are rendered light; this is the filter the canvas gets in
+      // dark mode, so the two match
+      filter: var(--theme-filter);
+    }
+  }
+
+  .drive-thumbnail__empty {
+    display: flex;
+    color: var(--color-gray-40);
+
+    svg {
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+  }
+
+  .drive-dialog__hint {
+    margin: 0 0 0.75rem;
+    color: var(--color-gray-50);
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+
+  .drive-dialog__error {
+    margin: 0 0 0.75rem;
+    color: var(--color-danger);
+    font-size: 0.875rem;
+  }
+
+  .drive-dialog__footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+  }
+
+  .drive-dialog__link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--color-primary);
+    font: inherit;
+    font-size: 0.875rem;
+    cursor: pointer;
+
+    svg {
+      width: 1rem;
+      height: 1rem;
+    }
+
+    &:hover:not(:disabled) {
+      text-decoration: underline;
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+  }
+
+  .drive-drawings__search {
+    margin-bottom: 1rem;
+  }
+
+  .drive-drawings__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: 1rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .drive-drawings__card {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    padding: 0;
+    border: 1px solid var(--default-border-color);
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+    background-color: var(--island-bg-color);
+    color: var(--text-primary-color);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      border-color: var(--color-primary);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--color-primary);
+      outline-offset: 2px;
+    }
+
+    &:disabled {
+      cursor: progress;
+      opacity: 0.6;
+    }
+  }
+
+  .drive-drawings__card--current {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 1px var(--color-primary);
+  }
+
+  .drive-drawings__thumbnail {
+    aspect-ratio: 16 / 10;
+    border-bottom: 1px solid var(--default-border-color);
+  }
+
+  .drive-drawings__name {
+    padding: 0.5rem 0.625rem 0;
+    font-size: 0.875rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .drive-drawings__time {
+    padding: 0.125rem 0.625rem 0.5rem;
+    color: var(--color-gray-50);
+    font-size: 0.75rem;
+  }
+
+  .drive-drawings__empty {
+    margin: 2rem 0;
+    color: var(--color-gray-50);
+    text-align: center;
+  }
+
+  .drive-folders__list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    max-height: 16rem;
+    margin: 0 0 1rem;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .drive-folders__item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    width: 100%;
+    padding: 0.5rem 0.625rem;
+    border: 0;
+    border-radius: var(--border-radius-md);
+    background: none;
+    color: var(--text-primary-color);
+    font: inherit;
+    font-size: 0.875rem;
+    text-align: start;
+    cursor: pointer;
+
+    > svg {
+      flex: none;
+      width: 1.125rem;
+      height: 1.125rem;
+      color: var(--color-gray-50);
+    }
+
+    &:hover {
+      background-color: var(--button-hover-bg);
+    }
+  }
+
+  .drive-folders__item--selected {
+    background-color: var(--color-surface-high);
+    font-weight: 600;
+
+    > svg:last-child {
+      color: var(--color-primary);
+    }
+  }
+
+  .drive-folders__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .drive-folders__create {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+}

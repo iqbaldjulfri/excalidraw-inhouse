@@ -133,8 +133,12 @@
   }
 
   .drive-title__menu {
-    width: 18rem;
+    width: 20rem;
     max-width: calc(100vw - 2rem);
+
+    .dropdown-menu-item__shortcut {
+      white-space: nowrap;
+    }
   }
 
   .drive-title__menu-head {
@@ -159,8 +163,24 @@
     color: var(--color-danger) !important;
   }
 
+  .drive-title__recent {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    min-width: 0;
+  }
+
+  .drive-title__recent-thumbnail {
+    flex: none;
+    width: 4.5rem;
+    height: 2.8125rem;
+    border: 1px solid var(--default-border-color);
+    border-radius: var(--border-radius-md);
+  }
+
   .drive-title__recent-name {
     display: block;
+    min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;

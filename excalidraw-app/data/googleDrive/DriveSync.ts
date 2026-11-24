@@ -1,10 +1,18 @@
-import { CaptureUpdateAction } from "@excalidraw/excalidraw";
+import { CaptureUpdateAction, exportScene } from "@excalidraw/excalidraw";
 import { openConfirmModal } from "@excalidraw/excalidraw/components/OverwriteConfirm/OverwriteConfirmState";
 import { t } from "@excalidraw/excalidraw/i18n";
-import { debounce } from "@excalidraw/common";
+import { THEME, debounce } from "@excalidraw/common";
+import { getNonDeletedElements } from "@excalidraw/element";
 
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import type { OrderedExcalidrawElement } from "@excalidraw/element/types";
+import type {
+  AppState,
+  BinaryFiles,
+  ExcalidrawImperativeAPI,
+} from "@excalidraw/excalidraw/types";
+import type {
+  ExcalidrawElement,
+  OrderedExcalidrawElement,
+} from "@excalidraw/element/types";
 
 import { appJotaiStore, atom } from "../../app-jotai";
 
@@ -26,7 +34,7 @@ import {
 
 import { pickDrawingFile, pickFolder } from "./picker";
 
-import type { DriveDrawing } from "./driveApi";
+import type { DriveDrawing, DriveFolderItem } from "./driveApi";
 import type { PickedItem } from "./picker";
 
 // localStorage, not sessionStorage: tabs share one canvas in localStorage, so
@@ -36,6 +44,14 @@ const SAVE_FOLDER_STORAGE_KEY = "excalidraw-gdrive-save-folder";
 const DEFAULT_FOLDER_NAME = "Excalidraw";
 
 const SYNC_DEBOUNCE_MS = 2000;
+/**
+ * Thumbnails ride along with content uploads at most this often. Each one
+ * costs a canvas render and a bigger request, and nobody browses the grid
+ * mid-stroke.
+ */
+const THUMBNAIL_INTERVAL_MS = 30 * 1000;
+const THUMBNAIL_WIDTH = 480;
+const THUMBNAIL_HEIGHT = 300;
 
 export type DriveLink = {
   fileId: string;
@@ -67,7 +83,20 @@ export type DriveState = {
   saveFolder: DriveFolder | null;
   /** Opening, creating or deleting a drawing; blocks other list actions. */
   busy: boolean;
+  /**
+   * Object URLs of thumbnails rendered in this tab, by file id. Fresher than
+   * Drive's thumbnailLink, which may still be processing the last upload.
+   */
+  localThumbnails: Record<string, string>;
 };
+
+type ThumbnailScene = {
+  elements: readonly ExcalidrawElement[];
+  appState: AppState;
+  files: BinaryFiles;
+};
+
+export type ThumbnailRenderer = (scene: ThumbnailScene) => Promise<Blob>;
 
 export type DriveFolder = { id: string; name: string };
 
@@ -129,6 +158,7 @@ export const driveStateAtom = atom<DriveState>({
   error: null,
   saveFolder: null,
   busy: false,
+  localThumbnails: {},
 });
 
 const getErrorMessage = (error: unknown) =>
@@ -150,16 +180,24 @@ export class DriveSync {
   private linkGeneration = 0;
 
   private readonly pickers: Pickers;
+  private readonly renderThumbnail: ThumbnailRenderer;
+  /** When each file's thumbnail was last sent to Drive from this tab. */
+  private thumbnailSentAt = new Map<string, number>();
+  /** File whose canvas changed since its last thumbnail was sent. */
+  private staleThumbnailFileId: string | null = null;
+  private thumbnailTimer: number | null = null;
 
   constructor(
     private readonly opts: {
       client?: DriveClient;
       confirmReplaceCanvas?: () => Promise<boolean>;
       pickers?: Pickers;
+      renderThumbnail?: ThumbnailRenderer;
     } = {},
   ) {
     this.client = opts.client ?? new DriveClient(getDriveAccessToken);
     this.pickers = opts.pickers ?? googlePickers;
+    this.renderThumbnail = opts.renderThumbnail ?? renderThumbnail;
   }
 
   getState() {
@@ -224,6 +262,7 @@ export class DriveSync {
    */
   async prepareForSignOut() {
     await this.syncNow();
+    await this.sendStaleThumbnail();
     const { current, syncStatus } = this.getState();
     // cleared only when it's safely in Drive: an unlinked canvas may be
     // someone's only copy of their work
@@ -237,6 +276,7 @@ export class DriveSync {
       syncStatus: "idle",
       lastSyncedAt: null,
       error: null,
+      localThumbnails: this.clearLocalThumbnails(),
     });
     if (isSavedToDrive) {
       this.api?.resetScene();
@@ -389,10 +429,13 @@ export class DriveSync {
 
       const localHash = hashSyncableElements(elements);
       if (localHash !== driveHash) {
+        const thumbnail = await this.thumbnailIfDue(current.fileId, elements);
         const saved = await this.client.updateDrawingContent(
           current.fileId,
           serializeDriveScene(elements, api.getAppState(), api.getFiles()),
+          thumbnail ?? undefined,
         );
+        this.afterThumbnailUpload(current.fileId, !!thumbnail);
         version = saved.version;
         this.updateListedDrawing(saved);
         if (isStale()) {
@@ -451,6 +494,8 @@ export class DriveSync {
 
   unlink() {
     this.scheduleSync.cancel();
+    this.cancelThumbnailTimer();
+    this.staleThumbnailFileId = null;
     this.resetSyncTracking();
     this.setCurrent(null);
   }
@@ -483,6 +528,7 @@ export class DriveSync {
     }
     if (this.getState().current) {
       await this.syncNow();
+      await this.sendStaleThumbnail();
       return this.getState().syncStatus !== "error";
     }
     const hasUnsavedContent = api
@@ -556,6 +602,10 @@ export class DriveSync {
       this.lastSyncedIds = new Set(remote.elements.map((el) => el.id));
       this.setCurrent({ fileId, name, version: metadata.version });
       this.setState({ syncStatus: "synced", lastSyncedAt: Date.now() });
+      if (!metadata.thumbnailLink) {
+        // made elsewhere, or before thumbnails existed: give it one now
+        this.afterThumbnailUpload(fileId, false);
+      }
     });
   }
 
@@ -599,13 +649,19 @@ export class DriveSync {
         { ...api.getAppState(), name },
         api.getFiles(),
       );
-      let created: DriveDrawing;
-      try {
-        created = await this.client.createDrawing({
-          folderId: saveFolder.id,
+      const thumbnail = opts.fromCanvas
+        ? await this.tryRenderThumbnail(elements)
+        : null;
+      const upload = (folderId: string) =>
+        this.client.createDrawing({
+          folderId,
           name,
           content,
+          thumbnail: thumbnail?.blob,
         });
+      let created: DriveDrawing;
+      try {
+        created = await upload(saveFolder.id);
       } catch (error) {
         if (!isDriveNotFoundError(error)) {
           throw error;
@@ -614,11 +670,11 @@ export class DriveSync {
         const fallback = await this.defaultFolder();
         writeSaveFolder(null);
         this.setState({ saveFolder: fallback });
-        created = await this.client.createDrawing({
-          folderId: fallback.id,
-          name,
-          content,
-        });
+        created = await upload(fallback.id);
+      }
+      if (thumbnail) {
+        this.thumbnailSentAt.set(created.id, Date.now());
+        this.setLocalThumbnail(created.id, thumbnail.url);
       }
       this.lastSyncedHash = hashSyncableElements(elements);
       this.lastSyncedIds = new Set(elements.map((element) => element.id));
@@ -650,12 +706,143 @@ export class DriveSync {
     }
   }
 
+  /** Picks a folder anywhere in Drive with Google's picker. */
   async chooseSaveFolder() {
     const picked = await this.runPicker(this.pickers.pickFolder);
     if (picked) {
-      writeSaveFolder(picked);
-      this.setState({ saveFolder: picked });
+      this.setSaveFolder(picked);
     }
+  }
+
+  setSaveFolder(folder: DriveFolder) {
+    writeSaveFolder(folder);
+    this.setState({ saveFolder: folder });
+  }
+
+  /** Folders this app can see: ones it made, and ones picked in the picker. */
+  listFolders(): Promise<DriveFolderItem[]> {
+    return this.client.listFolders();
+  }
+
+  async createFolder(name: string): Promise<DriveFolderItem> {
+    return this.client.createFolder(name.trim());
+  }
+
+  // ---------------------------------------------------------------------------
+  // thumbnails
+
+  private async tryRenderThumbnail(elements: readonly ExcalidrawElement[]) {
+    const api = this.api;
+    if (!api) {
+      return null;
+    }
+    try {
+      const blob = await this.renderThumbnail({
+        elements,
+        appState: api.getAppState(),
+        files: api.getFiles(),
+      });
+      return { blob, url: URL.createObjectURL(blob) };
+    } catch (error) {
+      // a missing preview isn't worth failing the save over
+      console.warn("Couldn't render the drawing thumbnail", error);
+      return null;
+    }
+  }
+
+  /** Renders a thumbnail to send with this upload, unless one went out lately. */
+  private async thumbnailIfDue(
+    fileId: string,
+    elements: readonly ExcalidrawElement[],
+  ): Promise<Blob | null> {
+    const sentAt = this.thumbnailSentAt.get(fileId);
+    if (sentAt !== undefined && Date.now() - sentAt < THUMBNAIL_INTERVAL_MS) {
+      return null;
+    }
+    const thumbnail = await this.tryRenderThumbnail(elements);
+    if (!thumbnail) {
+      return null;
+    }
+    this.setLocalThumbnail(fileId, thumbnail.url);
+    return thumbnail.blob;
+  }
+
+  private afterThumbnailUpload(fileId: string, sentThumbnail: boolean) {
+    if (sentThumbnail) {
+      this.thumbnailSentAt.set(fileId, Date.now());
+      if (this.staleThumbnailFileId === fileId) {
+        this.staleThumbnailFileId = null;
+        this.cancelThumbnailTimer();
+      }
+      return;
+    }
+    this.staleThumbnailFileId = fileId;
+    if (this.thumbnailTimer === null) {
+      const sentAt = this.thumbnailSentAt.get(fileId) ?? 0;
+      this.thumbnailTimer = window.setTimeout(() => {
+        this.thumbnailTimer = null;
+        this.syncChain = this.syncChain.then(() => this.sendStaleThumbnail());
+      }, Math.max(0, sentAt + THUMBNAIL_INTERVAL_MS - Date.now()));
+    }
+  }
+
+  /**
+   * Sends the thumbnail an upload skipped, so the grid doesn't keep showing
+   * the drawing as it was up to 30 seconds before the user stopped.
+   */
+  private async sendStaleThumbnail() {
+    const fileId = this.staleThumbnailFileId;
+    const api = this.api;
+    this.cancelThumbnailTimer();
+    if (
+      !api ||
+      !fileId ||
+      this.getState().current?.fileId !== fileId ||
+      this.getState().connection !== "connected"
+    ) {
+      return;
+    }
+    this.staleThumbnailFileId = null;
+    const thumbnail = await this.tryRenderThumbnail(
+      api.getSceneElementsIncludingDeleted(),
+    );
+    if (!thumbnail) {
+      return;
+    }
+    this.setLocalThumbnail(fileId, thumbnail.url);
+    try {
+      // bumps the file version, so the next sync downloads once to compare
+      this.updateListedDrawing(
+        await this.client.setThumbnail(fileId, thumbnail.blob),
+      );
+      this.thumbnailSentAt.set(fileId, Date.now());
+    } catch (error) {
+      console.warn("Couldn't save the drawing thumbnail", error);
+    }
+  }
+
+  private cancelThumbnailTimer() {
+    if (this.thumbnailTimer !== null) {
+      window.clearTimeout(this.thumbnailTimer);
+      this.thumbnailTimer = null;
+    }
+  }
+
+  private setLocalThumbnail(fileId: string, url: string) {
+    const { localThumbnails } = this.getState();
+    const previous = localThumbnails[fileId];
+    if (previous) {
+      URL.revokeObjectURL(previous);
+    }
+    this.setState({ localThumbnails: { ...localThumbnails, [fileId]: url } });
+  }
+
+  private clearLocalThumbnails() {
+    for (const url of Object.values(this.getState().localThumbnails)) {
+      URL.revokeObjectURL(url);
+    }
+    this.thumbnailSentAt.clear();
+    return {};
   }
 
   private async runPicker(pick: () => Promise<PickedItem | null>) {
@@ -759,6 +946,50 @@ const googlePickers: Pickers = {
       ...(await pickerOptions()),
       title: t("googleDrive.picker.folderTitle"),
     }),
+};
+
+const renderThumbnail: ThumbnailRenderer = async ({
+  elements,
+  appState,
+  files,
+}) => {
+  const liveElements = getNonDeletedElements(elements);
+  let canvas: HTMLCanvasElement;
+  if (liveElements.length) {
+    canvas = await exportScene({
+      type: "canvas",
+      data: { elements: liveElements, files },
+      config: {
+        width: THUMBNAIL_WIDTH,
+        height: THUMBNAIL_HEIGHT,
+        fit: "contain",
+        position: "center",
+        padding: 24,
+        // dark mode inverts it with the canvas's own CSS filter, so one
+        // thumbnail serves both themes
+        theme: THEME.LIGHT,
+        canvasBackgroundColor: appState.viewBackgroundColor,
+      },
+    });
+  } else {
+    // a cleared canvas still needs a thumbnail, or Drive keeps the old one
+    canvas = document.createElement("canvas");
+    canvas.width = THUMBNAIL_WIDTH;
+    canvas.height = THUMBNAIL_HEIGHT;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = appState.viewBackgroundColor;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  return new Promise((resolve, reject) => {
+    // browsers that can't encode WebP (Safari) fall back to PNG, which
+    // Drive accepts just as well
+    canvas.toBlob(
+      (blob) =>
+        blob ? resolve(blob) : reject(new Error("couldn't encode thumbnail")),
+      "image/webp",
+      0.8,
+    );
+  });
 };
 
 export const driveSync = new DriveSync();

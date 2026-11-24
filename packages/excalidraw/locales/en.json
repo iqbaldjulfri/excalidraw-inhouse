@@ -833,9 +833,10 @@
       "signOut": "Sign out",
       "signInAgain": "Sign in again",
       "retry": "Try again",
-      "openFromDrive": "Open from Drive…",
       "changeFolder": "Change",
-      "saveToDrive": "Save to Drive"
+      "saveToDrive": "Save to Drive",
+      "allDrawings": "All drawings…",
+      "importFromDrive": "Import from Google Drive…"
     },
     "list": {
       "empty": "No drawings in Drive yet."
@@ -858,6 +859,20 @@
     "picker": {
       "openTitle": "Open an Excalidraw drawing",
       "folderTitle": "Choose where new drawings are saved"
+    },
+    "browser": {
+      "title": "All drawings",
+      "search": "Search drawings",
+      "openNow": "Open now",
+      "noMatches": "No drawings match \"{{query}}\"."
+    },
+    "folders": {
+      "title": "Save new drawings to",
+      "hint": "These are the folders this app made or you picked before. Google only lets it see those.",
+      "loading": "Loading folders…",
+      "newPlaceholder": "New folder name",
+      "create": "Create",
+      "pickAnywhere": "Choose another folder in Google Drive…"
     }
   }
 }
