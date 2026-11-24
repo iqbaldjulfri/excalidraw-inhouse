@@ -133,7 +133,7 @@ import {
 } from "./data/LocalData";
 import { isBrowserStorageStateNewer } from "./data/tabSync";
 import { driveSync } from "./data/googleDrive/DriveSync";
-import { useCurrentUser } from "./data/session";
+import { currentUserAtom, useSessionReady } from "./data/session";
 import { ShareDialog, shareDialogStateAtom } from "./share/ShareDialog";
 import CollabError, { collabErrorIndicatorAtom } from "./collab/CollabError";
 import { useHandleAppTheme } from "./useHandleAppTheme";
@@ -416,7 +416,7 @@ const ExcalidrawWrapper = () => {
     return isCollaborationLink(window.location.href);
   });
   const collabError = useAtomValue(collabErrorIndicatorAtom);
-  const currentUser = useCurrentUser();
+  const currentUser = useAtomValue(currentUserAtom);
 
   useEffect(() => {
     // null only: an empty name is the user's choice to stay anonymous
@@ -1343,10 +1343,14 @@ const ExcalidrawWrapper = () => {
 };
 
 const ExcalidrawApp = () => {
+  const sessionReady = useSessionReady();
   const isCloudExportWindow =
     window.location.pathname === APP_ROUTES.excalidrawPlusExport;
   if (isCloudExportWindow) {
     return <ExcalidrawPlusIframeExport />;
+  }
+  if (!sessionReady) {
+    return null;
   }
 
   return (

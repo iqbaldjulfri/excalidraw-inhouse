@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
-import { atom, appJotaiStore, useAtomValue } from "../app-jotai";
+import { atom, appJotaiStore } from "../app-jotai";
 
 export type CurrentUser = {
   email: string;
@@ -93,24 +93,32 @@ export const signOut = async () => {
 };
 
 /**
- * Loads the signed-in user. In production the reverse proxy already blocks
- * signed-out visitors; this covers the dev server, which has no proxy.
+ * Loads the signed-in user and returns whether the app may render. In
+ * production the reverse proxy already blocks signed-out visitors; this covers
+ * the dev server, which has no proxy, and would otherwise show the canvas
+ * until the redirect to sign-in lands.
  */
-export const useCurrentUser = () => {
+export const useSessionReady = () => {
+  const [ready, setReady] = useState(!isAuthEnabled());
   useEffect(() => {
     if (!isAuthEnabled()) {
       return;
     }
     fetchCurrentUser().then(
-      (user) => appJotaiStore.set(currentUserAtom, user),
+      (user) => {
+        appJotaiStore.set(currentUserAtom, user);
+        setReady(true);
+      },
       (error) => {
         if (error instanceof SignedOutError) {
           window.location.assign(signInUrl());
         } else {
+          // auth server unreachable: keep the app usable for local drawing
           console.error(error);
+          setReady(true);
         }
       },
     );
   }, []);
-  return useAtomValue(currentUserAtom);
+  return ready;
 };
